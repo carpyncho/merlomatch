@@ -22,6 +22,8 @@ import logging
 import multiprocessing as mp
 import csv
 import glob
+import tempfile
+import atexit
 
 import sh
 
@@ -29,14 +31,26 @@ import numpy as np
 
 
 # =============================================================================
-# CONSTANTS AND LOG
+# LOG
+# =============================================================================
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("mmatch")
+
+
+# =============================================================================
+# CONSTANTS
 # =============================================================================
 
 DOC = __doc__
 
 DEFAULT_RADIUS = 3 * 9.2592592592592588e-5
 
-DEFAULT_WORK_DIRECTORY = "_temp"
+try:
+    DEFAULT_FITSIO_CAT_LIST = sh.Command("./fitsio_cat_list")
+except sh.CommandNotFound:
+    DEFAULT_FITSIO_CAT_LIST = None
+    logger.warning("Default 'fitsio_cat_list' not found")
 
 CPU_COUNT = mp.cpu_count()
 
@@ -45,15 +59,21 @@ DTYPE = {
     "formats": [int, int, float, int, int, float]
 }
 
-
 # =============================================================================
 # CLASSES
 # =============================================================================
 
 class Matcher(mp.Process):
 
-    def __init__(self):
-        pass
+    def __init__(self, idx, sources, pawprints, fitsio_cat_list,
+                 work_directory, radius):
+        super(Matcher, self).__init__()
+        self.idx = idx
+        self.sources = sources
+        self.pawprints = pawprints
+        self.fitsio_cat_list = fitsio_cat_list
+        self.work_directory = work_directory
+        self.radius = radius
 
     def ra_to_degree(self, arr):
         return 15 * (
@@ -66,6 +86,14 @@ class Matcher(mp.Process):
             np.abs(arr['dec_d']) +
             arr['dec_m'] / 60.0 +
             arr['dec_s'] / 3600.0)
+
+    def run(self):
+        logger.info("Starting matcher '{}'...".format(self.idx))
+        # convert to ascii
+        # convert all sources to deg
+        # match the sources
+        # store the value
+        logger.info("Matcher '{}' DONE!".format(self.idx))
 
 
 # =============================================================================
@@ -135,8 +163,13 @@ def _main(argv):
             default=DEFAULT_RADIUS, type=float,
             help="Radiuous to make the crossmatch")
         parser.add_argument(
+            "--fitsio-cat-list", "-fcl", dest="fitsio_cat_list",
+            required=not bool(DEFAULT_FITSIO_CAT_LIST), metavar="PATH",
+            default=DEFAULT_FITSIO_CAT_LIST, type=sh.Command,
+            help="fitsio_cat_list command PATH")
+        parser.add_argument(
             "-w", "--working-directory", dest="work_directory",
-            default=DEFAULT_WORK_DIRECTORY, action="store", metavar="PATH",
+            action="store", metavar="PATH",
             help="directory to store the temporary files")
         parser.add_argument(
             '--output', '-o', dest='output', action='store',
@@ -160,6 +193,13 @@ def _main(argv):
                 files.append(abspath)
         return list(set(files))
 
+    def work_dir(path):
+        if path:
+            return path
+        path = tempfile.mkdtemp(suffix="_mmatch")
+        atexit.register(shutil.rmtree, path=path)
+        return path
+
     # parse the arguments
     parser = get_parser()
     args = parser.parse_args(argv)
@@ -168,7 +208,8 @@ def _main(argv):
     sources = np.concatenate(args.sources)
     pawprints = to_files(args.pawprints)
     radius = args.radius
-    work_directory = args.work_directory
+    fitsio_cat_list = args.fitsio_cat_list
+    work_directory = work_dir(args.work_directory)
     output = args.output
     procs = args.procs
 
@@ -178,8 +219,9 @@ def _main(argv):
     # run the process
     running_procs = []
     for idx, chunk in enumerate(chunk_it(pawprints, procs_to_span)):
-        matcher = Match(
-            idx=idx, sources=sources, pawprint=chunk,
+        matcher = Matcher(
+            idx=idx, sources=sources, pawprints=chunk,
+            fitsio_cat_list=fitsio_cat_list,
             work_directory=work_directory, radius=radius)
         if procs:
             matcher.start()
