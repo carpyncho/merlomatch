@@ -24,6 +24,7 @@ import csv
 import glob
 import tempfile
 import atexit
+import uuid
 
 import sh
 
@@ -65,35 +66,63 @@ DTYPE = {
 
 class Matcher(mp.Process):
 
-    def __init__(self, idx, sources, pawprints, fitsio_cat_list,
+    def __init__(self, idx, ras, decs, pawprints, fitsio_cat_list,
                  work_directory, radius):
         super(Matcher, self).__init__()
         self.idx = idx
-        self.sources = sources
+        self.ras = ras
+        self.decs = decs
         self.pawprints = pawprints
         self.fitsio_cat_list = fitsio_cat_list
-        self.work_directory = work_directory
         self.radius = radius
+        self.uuid = str(uuid.uuid1())
+        self.work_directory = work_directory
+        self.ascii_directory = os.path.join(work_directory, "ascii")
+        self.array_directory = os.path.join(work_directory, "arrays")
+        self.temp_directory_directory = os.path.join(
+            work_directory, "temp", self.uuid)
+        self.setup_dirs()
 
-    def ra_to_degree(self, arr):
-        return 15 * (
-            arr['ra_h'] +
-            arr['ra_m'] / 60.0 +
-            arr['ra_s'] / 3600.0)
+    def setup_dirs(self):
+        paths = (self.ascii_directory,
+                 self.array_directory, self.temp_directory_directory)
+        for path in paths:
+            if not os.path.exists(path):
+                os.makedirs(path)
 
-    def dec_to_degree(self, arr):
-        return np.sign(arr['dec_d']) * (
-            np.abs(arr['dec_d']) +
-            arr['dec_m'] / 60.0 +
-            arr['dec_s'] / 3600.0)
+    def load_pawprint(self, pawprint):
+        basename = os.path.splitext(os.path.basename(pawprint))[0]
+        arrayname = "{}.npy".format(basename)
+        arraypath = os.path.join(self.array_directory, arrayname)
+        if not os.path.exists(arraypath):
+            asciiname = "{}.txt".format(basename)
+            asciipath = os.path.join(self.ascii_directory, arrayname)
+            if not os.path.exists(asciipath):
+                # convertir a ascii
+            # leer ascii
+            # crear el numpy
+
+        return np.load(arraypath)
+
+
 
     def run(self):
-        logger.info("Starting matcher '{}'...".format(self.idx))
-        # convert to ascii
-        # convert all sources to deg
+        logger.info("Starting matcher '{}[{}]'...".format(self.idx, self.uuid))
+
+        # setup the directory
+
+
+
+        for pawprint in self.pawprints:
+            pwp_ras, pwp_decs = self.load_pawprint(pawprint)
+            # convert to ascii
+
+
+        import ipdb; ipdb.set_trace()
+
         # match the sources
         # store the value
-        logger.info("Matcher '{}' DONE!".format(self.idx))
+        logger.info("Matcher '{}[]' DONE!".format(self.idx, self.uuid))
 
 
 # =============================================================================
@@ -113,7 +142,7 @@ def chunk_it(seq, num):
     return sorted(out, reverse=True)
 
 
-def ra_dec(string):
+def radec_source(string):
     """Convert a RA, DEC string with the format "17:29:21.4 -30:56:02" to
     a numpy record array
     """
@@ -122,7 +151,7 @@ def ra_dec(string):
     return np.array([row], dtype=DTYPE)
 
 
-def csv_ra_decs(path):
+def csv_sources(path):
     """Take the first 2 columns of a CSV and convert it to a
     numpy record array
 
@@ -131,8 +160,24 @@ def csv_ra_decs(path):
     with open(path) as fp:
         for row in csv.reader(fp):
             ra_dec_string = " ".join(row[:2])
-            ra_decs.append(ra_dec(ra_dec_string))
+            ra_decs.append(radec_source(ra_dec_string))
     return ra_decs
+
+
+def radec_deg(sources):
+    """Generate two arrays with RA and DEC as degree
+
+    """
+    ra = 15 * (sources['ra_h'] +
+               sources['ra_m'] / 60.0 +
+               sources['ra_s'] / 3600.0)
+
+    dec = np.sign(sources['dec_d']) * (np.abs(sources['dec_d']) +
+                                       sources['dec_m'] / 60.0 +
+                                       sources['dec_s'] / 3600.0)
+
+    return ra, dec
+
 
 
 # =============================================================================
@@ -147,11 +192,11 @@ def _main(argv):
         group = parser.add_mutually_exclusive_group(required=True)
         group.add_argument(
             '--sources-file', '-srcf', dest='sources', action='store',
-            type=csv_ra_decs, metavar="PATH",
+            type=csv_sources, metavar="PATH",
             help='CSV file with at least 2 columns "ra, dec"')
         group.add_argument(
             '--sources', '-srcs', dest='sources', action='store',
-            type=ra_dec, metavar='"RA DEC"', nargs="+",
+            type=radec_source, metavar='"RA DEC"', nargs="+",
             help='Quoted ra and dec parameters example: '
                  '"17:29:21.4 -30:56:02"')
         parser.add_argument(
@@ -205,7 +250,7 @@ def _main(argv):
     args = parser.parse_args(argv)
 
     # extract and post-process the input data
-    sources = np.concatenate(args.sources)
+    src_ras, src_decs = radec_deg(np.concatenate(args.sources))
     pawprints = to_files(args.pawprints)
     radius = args.radius
     fitsio_cat_list = args.fitsio_cat_list
@@ -213,15 +258,22 @@ def _main(argv):
     output = args.output
     procs = args.procs
 
+    logger.info("Using fitsio_cat_list: {}".format(fitsio_cat_list))
+
     # at least we need one proc to run
-    procs_to_span = procs if procs else 1
+    if procs:
+        procs_to_span = procs
+        logger.info("Starting {} matchers".format(procs))
+    else:
+        logger.info("Synchronous match")
+        procs_to_span = 1
 
     # run the process
     running_procs = []
     for idx, chunk in enumerate(chunk_it(pawprints, procs_to_span)):
         matcher = Matcher(
-            idx=idx, sources=sources, pawprints=chunk,
-            fitsio_cat_list=fitsio_cat_list,
+            idx=idx, ras=src_ras, decs=src_decs,
+            pawprints=chunk, fitsio_cat_list=fitsio_cat_list,
             work_directory=work_directory, radius=radius)
         if procs:
             matcher.start()
