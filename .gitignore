@@ -87,3 +87,8 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+# mmatch
+bin/fitsio_cat_list
+bin/vvv_flx2mag
+_temp/*
