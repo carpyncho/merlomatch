@@ -29,10 +29,13 @@ import tempfile
 import atexit
 import uuid
 import copy
+import uuid
 
 import sh
 
 import numpy as np
+
+from astropysics import coords
 
 
 # =============================================================================
@@ -84,6 +87,9 @@ PAWPRINT_DTYPE = {
     ]
 }
 
+MATCH_FIELDS = (
+    ["src.idx"]  + ["src.{}".format(n) for n in SOURCE_DTYPE["names"]] +
+    ["pwp.path"] + ["pwp.{}".format(n) for n in PAWPRINT_DTYPE["names"]])
 
 
 # =============================================================================
@@ -92,12 +98,11 @@ PAWPRINT_DTYPE = {
 
 class Matcher(mp.Process):
 
-    def __init__(self, idx, ras, decs, pawprints, vvv_flx2mag,
+    def __init__(self, idx, sources, pawprints, vvv_flx2mag,
                  work_directory, radius):
         super(Matcher, self).__init__()
         self.idx = idx
-        self.ras = ras
-        self.decs = decs
+        self.sources = sources
         self.pawprints = pawprints
         self.vvv_flx2mag = vvv_flx2mag
         self.radius = radius
@@ -105,11 +110,15 @@ class Matcher(mp.Process):
         self.work_directory = work_directory
         self.ascii_directory = os.path.join(work_directory, "ascii")
         self.array_directory = os.path.join(work_directory, "arrays")
+        self.temp_directory = os.path.join(work_directory, "temp")
+        self.tempfile = "{}.csv".format(self.uuid)
+        self.tempfile_path = os.path.join(self.temp_directory, self.tempfile)
         self.setup_dirs()
 
     def setup_dirs(self):
         paths = (self.ascii_directory,
-                 self.array_directory)
+                 self.array_directory,
+                 self.temp_directory)
         for path in paths:
             if not os.path.exists(path):
                 os.makedirs(path)
@@ -129,24 +138,7 @@ class Matcher(mp.Process):
             odata = np.genfromtxt(asciipath, PAWPRINT_DTYPE)
 
             # extract the ra and dec as degrees
-            radeg, decdeg = radec_deg(odata)
-
-            # create a new dtype to store the ra and dec as degrees
-            dtype = copy.deepcopy(PAWPRINT_DTYPE)
-            dtype["names"].insert(0, "dec_deg")
-            dtype["names"].insert(0, "ra_deg")
-            dtype["formats"].insert(0, float)
-            dtype["formats"].insert(0, float)
-
-            # create an empty array and copy the values
-            data = np.empty(len(odata), dtype=dtype)
-            for name in data.dtype.names:
-                if name == "ra_deg":
-                    data[name] = radeg
-                elif name == "dec_deg":
-                    data[name] = decdeg
-                else:
-                    data[name] = odata[name]
+            data = radec_deg(odata, PAWPRINT_DTYPE)
 
             # store the numpy array to future uses
             np.save(arraypath, data)
@@ -154,21 +146,48 @@ class Matcher(mp.Process):
 
         return np.load(arraypath)
 
+    def match(self, tile_ra, tile_dec, pwp_ra, pwp_dec):
+        nearestind_pwp, distance_pwp, match_pwp = coords.match_coords(
+            tile_ra, tile_dec, pwp_ra, pwp_dec,
+            eps=self.radius, mode="nearest")
+        nearestind_ms, distance_ms, match_ms = coords.match_coords(
+            pwp_ra, pwp_dec, tile_ra, tile_dec,
+            eps=self.radius, mode="nearest")
+        for idx_pwp, idx_ms in enumerate(nearestind_ms):
+            if match_ms[idx_pwp] and \
+               nearestind_pwp[idx_ms] == idx_pwp \
+               and match_pwp[idx_ms]:
+                    yield idx_ms, idx_pwp
+
+    def get_output(self):
+        with open(self.tempfile_path) as fp:
+            return fp.read()
+
     def run(self):
-        logger.info("Starting matcher '{}'...".format(self.idx))
+        logger.info("Starting matcher '{}'".format(self.idx))
+        ras, decs = self.sources["ra_deg"], self.sources["dec_deg"]
+        with open(self.tempfile_path, "w") as fp:
+            writer = csv.DictWriter(fp, MATCH_FIELDS)
+            for pawprint in self.pawprints:
+                logger.info("Matcher {}: '{}'...".format(self.idx, pawprint))
 
-        tile_ra, tile_dec = self.ras, self.decs
+                pwp_data = self.load_pawprint(pawprint)
+                pwp_ra, pwp_dec = pwp_data["ra_deg"], pwp_data["dec_deg"]
 
-        for pawprint in self.pawprints:
-            pwp_data = self.load_pawprint(pawprint)
+                matchs = self.match(ras, decs, pwp_ra, pwp_dec)
 
-            pwp_ra, pwp_dec = pwp_data["ra_deg"], pwp_data["dec_deg"]
-
-            import ipdb; ipdb.set_trace()
-
-        # match the sources
-        # store the value
-        logger.info("Matcher '{}[]' DONE!".format(self.idx, self.uuid))
+                for src_idx, pwp_idx in matchs:
+                    source, pwp = self.sources[src_idx], pwp_data[pwp_idx]
+                    row = {"src.idx": src_idx, "pwp.path": pawprint}
+                    for field in MATCH_FIELDS:
+                        if field in row:
+                            continue
+                        elif field.startswith("pwp."):
+                            row[field] = pwp[field.split(".")[-1]]
+                        else:
+                            row[field] = source[field.split(".")[-1]]
+                    writer.writerow(row)
+        logger.info("Matcher '{}' DONE!".format(self.idx))
 
 
 # =============================================================================
@@ -188,9 +207,33 @@ def chunk_it(seq, num):
     return sorted(out, reverse=True)
 
 
+def add_deg_columns(odata, dtypes, radeg, decdeg):
+    """Add ra_deg and dec_deg columns to existing recarray
+
+    """
+    # create a new dtype to store the ra and dec as degrees
+    dtype = copy.deepcopy(dtypes)
+    dtype["names"].insert(0, "dec_deg")
+    dtype["names"].insert(0, "ra_deg")
+    dtype["formats"].insert(0, float)
+    dtype["formats"].insert(0, float)
+
+    # create an empty array and copy the values
+    data = np.empty(len(odata), dtype=dtype)
+    for name in data.dtype.names:
+        if name == "ra_deg":
+            data[name] = radeg
+        elif name == "dec_deg":
+            data[name] = decdeg
+        else:
+            data[name] = odata[name]
+    return data
+
+
 def radec_source(string):
     """Convert a RA, DEC string with the format "17:29:21.4 -30:56:02" to
     a numpy record array
+
     """
     ra, dec = [map(float, e.split(":")) for e in string.split()]
     row = tuple(ra + dec)
@@ -210,7 +253,7 @@ def csv_sources(path):
     return ra_decs
 
 
-def radec_deg(sources):
+def radec_deg(sources, dtypes):
     """Generate two arrays with RA and DEC as degree
 
     """
@@ -222,7 +265,7 @@ def radec_deg(sources):
                                        sources['dec_m'] / 60.0 +
                                        sources['dec_s'] / 3600.0)
 
-    return ra, dec
+    return add_deg_columns(sources, dtypes, ra, dec)
 
 
 
@@ -302,7 +345,7 @@ def _main(argv):
     args = parser.parse_args(argv)
 
     # extract and post-process the input data
-    src_ras, src_decs = radec_deg(np.concatenate(args.sources))
+    sources = radec_deg(np.concatenate(args.sources), SOURCE_DTYPE)
     loglevel = args.loglevel
     pawprints = to_files(args.pawprints)
     radius = args.radius
@@ -326,18 +369,21 @@ def _main(argv):
     running_procs = []
     for idx, chunk in enumerate(chunk_it(pawprints, procs_to_span)):
         matcher = Matcher(
-            idx=idx, ras=src_ras, decs=src_decs,
+            idx=idx, sources=sources,
             pawprints=chunk, vvv_flx2mag=vvv_flx2mag,
             work_directory=work_directory, radius=radius)
         if procs:
             matcher.start()
-            running_procs.append(matcher)
         else:
             matcher.run()
-    for matcher in running_procs:
-        matcher.join()
+        running_procs.append(matcher)
 
-    # combine the outputs
+    logger.info("Mergin outputs...")
+    output.write(",".join(MATCH_FIELDS) + "\n")
+    for matcher in running_procs:
+        if matcher.is_alive():
+            matcher.join()
+        output.write(matcher.get_output())
 
 
 if __name__ == "__main__":
