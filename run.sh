@@ -11,6 +11,6 @@ python mmatch.py \
     -o matched.csv \
     -f2m bin/vvv_flx2mag \
     -wd _temp \
-    --procs 0
+    --procs 3
 
 #~ python mmatch.py  -o matched.csv --pawprints fits/v20100418_00895_st_cat.fits fits

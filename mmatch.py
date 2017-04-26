@@ -8,7 +8,7 @@ from __future__ import print_function
 # DOCS
 # =============================================================================
 
-__doc__ = """foo"""
+__doc__ = """A Cross-Match functionality for VVV sources"""
 
 __version__ = "0.0.1"
 
@@ -30,12 +30,15 @@ import atexit
 import uuid
 import copy
 import uuid
+import warnings
 
 import sh
 
 import numpy as np
 
-from astropysics import coords
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    from astropysics import coords
 
 
 # =============================================================================
@@ -55,13 +58,14 @@ DOC = __doc__
 
 VERSION = __version__
 
+EPILOG = "BSD-3 Licensed - IATE-OAC: http://iate.oac.uncor.edu/"
+
 DEFAULT_RADIUS = 3 * 9.2592592592592588e-5
 
 try:
     DEFAULT_VVV_FLX2MAG = sh.Command("./vvv_flx2mag")
 except sh.CommandNotFound:
     DEFAULT_VVV_FLX2MAG = None
-    logger.warning("Default 'vvv_flx2mag' not found")
 
 CPU_COUNT = mp.cpu_count()
 
@@ -276,7 +280,8 @@ def radec_deg(sources, dtypes):
 def _main(argv):
 
     def get_parser():
-        parser = argparse.ArgumentParser(description=DOC, version=VERSION)
+        parser = argparse.ArgumentParser(
+            description=DOC, version=VERSION, epilog=EPILOG)
 
         src_group = parser.add_mutually_exclusive_group(required=True)
         src_group.add_argument(
